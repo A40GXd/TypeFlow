@@ -1,0 +1,6 @@
+{
+  "name": "Monograph — Monochrome Text Editor",
+  "description": "A signup-free, architectural black-and-white online word processor with stack-based undo/redo, rich formatting, auto-correct, mobile virtual keyboard, and .txt/.pdf export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
