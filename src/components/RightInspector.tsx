@@ -286,6 +286,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <div className="grid grid-cols-2 gap-1.5 pt-1">
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={onUndo}
                   disabled={!canUndo}
                   className="h-8 px-2.5 flex items-center justify-center gap-1.5 rounded-[4px] border border-[#E4E4E7] bg-white text-[12px] font-medium text-[#09090B] hover:border-[#18181B] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -295,6 +296,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </button>
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={onRedo}
                   disabled={!canRedo}
                   className="h-8 px-2.5 flex items-center justify-center gap-1.5 rounded-[4px] border border-[#E4E4E7] bg-white text-[12px] font-medium text-[#09090B] hover:border-[#18181B] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -321,7 +323,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </div>
               ) : (
                 <div className="space-y-1 max-h-36 overflow-y-auto">
-                  {[...redoStack].reverse().map((snap, idx) => (
+                  {[...redoStack].reverse().slice(0, 60).map((snap, idx) => (
                     <div
                       key={snap.id}
                       className="px-2.5 py-1.5 bg-white border border-[#E4E4E7] rounded-[4px] flex items-center justify-between gap-2"
@@ -352,7 +354,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </span>
               </div>
               <div className="space-y-1 max-h-60 overflow-y-auto">
-                {[...undoStack].reverse().map((snap, idx) => (
+                {[...undoStack].reverse().slice(0, 60).map((snap, idx) => (
                   <div
                     key={snap.id}
                     className={`px-2.5 py-1.5 rounded-[4px] border flex items-center justify-between gap-2 ${

@@ -1,14 +1,14 @@
-import { StackSnapshot } from '../types/editor';
+import { SavedSelection, StackSnapshot } from '../types/editor';
 
 /**
  * Simple LIFO (Last-In, First-Out) Stack data structure.
- * Used to drive Undo and Redo operations cleanly and deterministically.
+ * Used to drive character-by-character Undo and Redo operations cleanly and deterministically.
  */
 export class SimpleStack<T> {
   private items: T[] = [];
   private readonly maxSize: number;
 
-  constructor(maxSize = 100) {
+  constructor(maxSize = 2000) {
     this.maxSize = maxSize;
   }
 
@@ -60,7 +60,7 @@ export class UndoRedoStackManager {
   private undoStack: SimpleStack<StackSnapshot>;
   private redoStack: SimpleStack<StackSnapshot>;
 
-  constructor(initialSnapshot?: StackSnapshot, maxHistory = 100) {
+  constructor(initialSnapshot?: StackSnapshot, maxHistory = 2000) {
     this.undoStack = new SimpleStack<StackSnapshot>(maxHistory);
     this.redoStack = new SimpleStack<StackSnapshot>(maxHistory);
     if (initialSnapshot) {
@@ -155,4 +155,97 @@ export class UndoRedoStackManager {
   getCurrentSnapshot(): StackSnapshot | undefined {
     return this.undoStack.peek();
   }
+
+  updateTopSelection(selection?: SavedSelection): void {
+    const top = this.undoStack.peek();
+    if (top && selection) {
+      top.selection = selection;
+    }
+  }
+}
+
+function getNodePath(root: HTMLElement, target: Node): number[] | null {
+  const path: number[] = [];
+  let curr: Node | null = target;
+  while (curr && curr !== root) {
+    const parent: ParentNode | null = curr.parentNode;
+    if (!parent) return null;
+    const index = Array.prototype.indexOf.call(parent.childNodes, curr);
+    if (index === -1) return null;
+    path.push(index);
+    curr = parent;
+  }
+  if (curr !== root) return null;
+  path.reverse();
+  return path;
+}
+
+function resolveNodePath(root: HTMLElement, path: number[]): Node | null {
+  let curr: Node = root;
+  for (const idx of path) {
+    if (!curr.childNodes || idx < 0 || idx >= curr.childNodes.length) {
+      return null;
+    }
+    curr = curr.childNodes[idx];
+  }
+  return curr;
+}
+
+/** Capture current DOM selection/caret as a serializable path relative to editor root. */
+export function captureSelection(root: HTMLElement): SavedSelection | undefined {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return undefined;
+  const range = sel.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return undefined;
+  }
+  const startPath = getNodePath(root, range.startContainer);
+  const endPath = getNodePath(root, range.endContainer);
+  if (!startPath || !endPath) return undefined;
+
+  return {
+    startPath,
+    startOffset: range.startOffset,
+    endPath,
+    endOffset: range.endOffset,
+  };
+}
+
+/** Restore a previously captured DOM selection/caret inside editor root. */
+export function restoreSelectionSnapshot(
+  root: HTMLElement,
+  saved?: SavedSelection
+): Range | null {
+  const sel = window.getSelection();
+  if (!sel) return null;
+
+  if (saved) {
+    const startNode = resolveNodePath(root, saved.startPath);
+    const endNode = resolveNodePath(root, saved.endPath);
+    if (startNode && endNode) {
+      const startMax =
+        startNode.nodeType === Node.TEXT_NODE
+          ? (startNode as Text).length
+          : startNode.childNodes.length;
+      const endMax =
+        endNode.nodeType === Node.TEXT_NODE
+          ? (endNode as Text).length
+          : endNode.childNodes.length;
+
+      const range = document.createRange();
+      range.setStart(startNode, Math.max(0, Math.min(saved.startOffset, startMax)));
+      range.setEnd(endNode, Math.max(0, Math.min(saved.endOffset, endMax)));
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return range;
+    }
+  }
+
+  // Fallback: collapse caret at end of root
+  const fallback = document.createRange();
+  fallback.selectNodeContents(root);
+  fallback.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(fallback);
+  return fallback;
 }

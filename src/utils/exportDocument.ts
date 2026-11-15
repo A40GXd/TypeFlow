@@ -53,8 +53,22 @@ function extractReadableText(root: HTMLElement): string {
     blocks.push(walk(child));
   });
 
-  const joined = blocks.join('').replace(/\n{3,}/g, '\n\n').trim();
-  return joined || root.innerText || '';
+  const joined = blocks
+    .join('')
+    .replace(/\u200B/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return joined || (root.innerText || '').replace(/\u200B/g, '');
+}
+
+function sanitizePdfText(str: string): string {
+  return str
+    .replace(/\u200B/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/→/g, '->')
+    .replace(/←/g, '<-')
+    .replace(/↑/g, '^')
+    .replace(/↓/g, 'v');
 }
 
 export function exportAsTxt(title: string, editorEl: HTMLElement | null): void {
@@ -143,7 +157,7 @@ export function exportAsPdf(title: string, editorEl: HTMLElement | null): void {
     inherited: Omit<TextRun, 'text'>
   ): TextRun[] => {
     if (node.nodeType === Node.TEXT_NODE) {
-      const val = (node.textContent || '').replace(/\u00A0/g, ' ');
+      const val = sanitizePdfText(node.textContent || '');
       return val ? [{ ...inherited, text: val }] : [];
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return [];
@@ -261,7 +275,7 @@ export function exportAsPdf(title: string, editorEl: HTMLElement | null): void {
       }
     }
 
-    // Group tokens into wrapped lines
+    // Group tokens into wrapped lines (breaking oversized unbreakable words too)
     const indentOffset = tag === 'blockquote' ? 16 : tag === 'li' ? 14 : 0;
     const lineMaxWidth = maxWidth - indentOffset;
     const lines: WordToken[][] = [[]];
@@ -274,6 +288,34 @@ export function exportAsPdf(title: string, editorEl: HTMLElement | null): void {
         continue;
       }
       const isSpace = /^\s+$/.test(tok.text);
+
+      // Split single oversized word/URL that exceeds lineMaxWidth
+      if (!isSpace && tok.width > lineMaxWidth) {
+        const style =
+          tok.run.bold && tok.run.italic
+            ? 'bolditalic'
+            : tok.run.bold
+            ? 'bold'
+            : tok.run.italic
+            ? 'italic'
+            : 'normal';
+        const effectiveSize =
+          tok.run.sup || tok.run.sub ? tok.run.fontSizePt * 0.72 : tok.run.fontSizePt;
+        doc.setFont('times', style);
+        doc.setFontSize(effectiveSize);
+        const chunks = doc.splitTextToSize(tok.text, lineMaxWidth) as string[];
+        for (const chunk of chunks) {
+          if (lines[lines.length - 1].length > 0) {
+            lines.push([]);
+            currentLineWidth = 0;
+          }
+          const w = doc.getTextWidth(chunk);
+          lines[lines.length - 1].push({ text: chunk, run: tok.run, width: w });
+          currentLineWidth = w;
+        }
+        continue;
+      }
+
       if (currentLineWidth + tok.width > lineMaxWidth && lines[lines.length - 1].length > 0 && !isSpace) {
         lines.push([]);
         currentLineWidth = 0;

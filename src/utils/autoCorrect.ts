@@ -173,10 +173,9 @@ export function applyAutoCorrectAtCaret(
 
   // 3. Auto-capitalize start of sentence or block
   if (autoCapitalize && /^[a-z]/.test(rawWord)) {
-    const prefixBeforeWord = beforeDelimiter.slice(0, wordStartIdx);
+    const fullPrefix = getBlockPrefixBeforeOffset(editorEl, textNode, wordStartIdx);
     const isSentenceStart =
-      (prefixBeforeWord.trim().length === 0 && isAtBlockStart(editorEl, textNode)) ||
-      /[.!?]\s+$/.test(prefixBeforeWord);
+      fullPrefix.trim().length === 0 || /[.!?]\s+$/.test(fullPrefix);
 
     if (isSentenceStart) {
       const capitalized = rawWord[0].toUpperCase() + rawWord.slice(1);
@@ -201,7 +200,11 @@ export function applyAutoCorrectAtCaret(
   return null;
 }
 
-function isAtBlockStart(editorEl: HTMLElement, textNode: Text): boolean {
+function getBlockPrefixBeforeOffset(
+  editorEl: HTMLElement,
+  textNode: Text,
+  offset: number
+): string {
   let block: Node | null = textNode.parentNode;
   while (block && block !== editorEl) {
     if (
@@ -215,6 +218,6 @@ function isAtBlockStart(editorEl: HTMLElement, textNode: Text): boolean {
   const container = block || editorEl;
   const range = document.createRange();
   range.setStart(container, 0);
-  range.setEnd(textNode, 0);
-  return range.toString().trim().length === 0;
+  range.setEnd(textNode, offset);
+  return range.toString().replace(/\u200B/g, '');
 }

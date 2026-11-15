@@ -11,7 +11,11 @@ import {
   StackSnapshot,
   TextAlignment,
 } from './types/editor';
-import { UndoRedoStackManager } from './utils/historyStack';
+import {
+  UndoRedoStackManager,
+  captureSelection,
+  restoreSelectionSnapshot,
+} from './utils/historyStack';
 import {
   DEFAULT_AUTOCORRECT_RULES,
   applyAutoCorrectAtCaret,
@@ -61,8 +65,11 @@ function loadInitialDocuments(): DocumentItem[] {
     const raw = localStorage.getItem(STORAGE_DOCS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DocumentItem[];
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const valid = parsed.filter(
+          (d) => d && typeof d.id === 'string' && typeof d.html === 'string' && typeof d.title === 'string'
+        );
+        if (valid.length > 0) return valid;
       }
     }
   } catch {
@@ -163,9 +170,11 @@ export default function App() {
 
   const editorRef = useRef<HTMLDivElement>(null);
   const savedRangeRef = useRef<Range | null>(null);
-  const typingTimerRef = useRef<number | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const isRestoringRef = useRef(false);
+  const titleRef = useRef(title);
+  titleRef.current = title;
+  const lastPlainTextRef = useRef('');
 
   // Persist documents & active doc ID
   useEffect(() => {
@@ -195,7 +204,7 @@ export default function App() {
     const el = editorRef.current;
     if (!el) return;
 
-    const rawText = (el.innerText || '').replace(/\r\n/g, '\n');
+    const rawText = (el.innerText || '').replace(/\r\n/g, '\n').replace(/\u200B/g, '');
     const cleanText = rawText.endsWith('\n') ? rawText.slice(0, -1) : rawText;
 
     const characters = cleanText.length;
@@ -216,7 +225,7 @@ export default function App() {
         const preRange = document.createRange();
         preRange.selectNodeContents(el);
         preRange.setEnd(sel.anchorNode, sel.anchorOffset);
-        const beforeText = preRange.toString();
+        const beforeText = preRange.toString().replace(/\u200B/g, '');
         const beforeLines = beforeText.split('\n');
         currentLine = beforeLines.length;
         currentColumn = beforeLines[beforeLines.length - 1].length + 1;
@@ -257,8 +266,10 @@ export default function App() {
     isRestoringRef.current = true;
     editorRef.current.innerHTML = doc.html || '<p><br></p>';
     setTitle(doc.title);
+    titleRef.current = doc.title;
     setBaseFontSize(doc.baseFontSize || 16);
     setPageWidth(doc.pageWidth || 'standard');
+    lastPlainTextRef.current = editorRef.current.innerText || '';
 
     stackManagerRef.current.reset({
       id: `init-${doc.id}-${Date.now()}`,
@@ -270,11 +281,8 @@ export default function App() {
     syncStackState();
     savedRangeRef.current = null;
     setBubblePosition(null);
-
-    requestAnimationFrame(() => {
-      updateStatsAndOutline();
-      isRestoringRef.current = false;
-    });
+    updateStatsAndOutline();
+    isRestoringRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDocId]);
 
@@ -299,40 +307,27 @@ export default function App() {
     [activeDocId]
   );
 
-  // Push snapshot onto Undo Stack immediately
+  // Push snapshot onto Undo Stack immediately (character-by-character & per-action)
   const pushStackSnapshot = useCallback(
     (actionLabel: string, overrideTitle?: string) => {
       if (!editorRef.current || isRestoringRef.current) return;
-      if (typingTimerRef.current) {
-        window.clearTimeout(typingTimerRef.current);
-        typingTimerRef.current = null;
-      }
       const html = editorRef.current.innerHTML;
-      const docTitle = overrideTitle ?? title;
+      const docTitle = overrideTitle ?? titleRef.current;
+      const selection = captureSelection(editorRef.current);
+      lastPlainTextRef.current = editorRef.current.innerText || '';
+
       const pushed = stackManagerRef.current.pushState({
         title: docTitle,
         html,
         actionLabel,
+        selection,
       });
       if (pushed) {
         syncStackState();
       }
       persistCurrentDocument(html, docTitle);
     },
-    [persistCurrentDocument, syncStackState, title]
-  );
-
-  // Schedule debounced stack push for continuous typing
-  const scheduleTypingSnapshot = useCallback(
-    (actionLabel = 'Typed text') => {
-      if (typingTimerRef.current) {
-        window.clearTimeout(typingTimerRef.current);
-      }
-      typingTimerRef.current = window.setTimeout(() => {
-        pushStackSnapshot(actionLabel);
-      }, 400);
-    },
-    [pushStackSnapshot]
+    [persistCurrentDocument, syncStackState]
   );
 
   // Inspect active formatting & selection state
@@ -352,6 +347,9 @@ export default function App() {
 
     // Save range so toolbar/virtual keyboard restores exact caret
     savedRangeRef.current = range.cloneRange();
+    if (!isRestoringRef.current) {
+      stackManagerRef.current.updateTopSelection(captureSelection(el));
+    }
 
     // Update contextual floating bubble menu position when text is highlighted
     if (!range.collapsed && sel.toString().trim().length > 0) {
@@ -456,59 +454,56 @@ export default function App() {
     }
   }, []);
 
-  // Stack Undo Operation
+  // Stack Undo Operation (pops current state to redoStack, restores previous state + caret)
   const handleUndo = useCallback(() => {
-    if (!editorRef.current) return;
-
-    // Flush any pending unpushed typing edit first
-    if (typingTimerRef.current) {
-      window.clearTimeout(typingTimerRef.current);
-      typingTimerRef.current = null;
-      const currentHtml = editorRef.current.innerHTML;
-      const top = stackManagerRef.current.getCurrentSnapshot();
-      if (top && (top.html !== currentHtml || top.title !== title)) {
-        stackManagerRef.current.pushState({
-          title,
-          html: currentHtml,
-          actionLabel: 'Typed text',
-        });
-      }
-    }
+    const el = editorRef.current;
+    if (!el) return;
 
     const previous = stackManagerRef.current.undo();
     if (!previous) return;
 
     isRestoringRef.current = true;
-    editorRef.current.innerHTML = previous.html;
+    el.innerHTML = previous.html;
     setTitle(previous.title);
+    titleRef.current = previous.title;
+    lastPlainTextRef.current = el.innerText || '';
+
+    el.focus({ preventScroll: true });
+    const restoredRange = restoreSelectionSnapshot(el, previous.selection);
+    savedRangeRef.current = restoredRange ? restoredRange.cloneRange() : null;
+
     persistCurrentDocument(previous.html, previous.title);
     syncStackState();
+    isRestoringRef.current = false;
 
-    requestAnimationFrame(() => {
-      isRestoringRef.current = false;
-      updateStatsAndOutline();
-      updateActiveFormats();
-    });
-  }, [persistCurrentDocument, syncStackState, title, updateActiveFormats, updateStatsAndOutline]);
+    updateStatsAndOutline();
+    updateActiveFormats();
+  }, [persistCurrentDocument, syncStackState, updateActiveFormats, updateStatsAndOutline]);
 
-  // Stack Redo Operation
+  // Stack Redo Operation (pops top of redoStack back to undoStack, restores state + caret)
   const handleRedo = useCallback(() => {
-    if (!editorRef.current) return;
+    const el = editorRef.current;
+    if (!el) return;
 
     const restored = stackManagerRef.current.redo();
     if (!restored) return;
 
     isRestoringRef.current = true;
-    editorRef.current.innerHTML = restored.html;
+    el.innerHTML = restored.html;
     setTitle(restored.title);
+    titleRef.current = restored.title;
+    lastPlainTextRef.current = el.innerText || '';
+
+    el.focus({ preventScroll: true });
+    const restoredRange = restoreSelectionSnapshot(el, restored.selection);
+    savedRangeRef.current = restoredRange ? restoredRange.cloneRange() : null;
+
     persistCurrentDocument(restored.html, restored.title);
     syncStackState();
+    isRestoringRef.current = false;
 
-    requestAnimationFrame(() => {
-      isRestoringRef.current = false;
-      updateStatsAndOutline();
-      updateActiveFormats();
-    });
+    updateStatsAndOutline();
+    updateActiveFormats();
   }, [persistCurrentDocument, syncStackState, updateActiveFormats, updateStatsAndOutline]);
 
   // Execute formatting command and push onto Undo Stack
@@ -575,17 +570,31 @@ export default function App() {
 
       const range = sel.getRangeAt(0);
       if (range.collapsed) {
-        // Insert a zero-width styled span at caret so typing continues in new size
-        const span = document.createElement('span');
-        span.style.fontSize = `${clamped}px`;
-        span.innerHTML = '&#8203;';
-        range.insertNode(span);
-        const newRange = document.createRange();
-        newRange.setStart(span.firstChild!, 1);
-        newRange.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(newRange);
-        savedRangeRef.current = newRange.cloneRange();
+        // Reuse existing zero-width styled span if caret is already inside one
+        const parentSpan =
+          range.startContainer.nodeType === Node.TEXT_NODE
+            ? range.startContainer.parentElement
+            : range.startContainer instanceof HTMLElement
+            ? range.startContainer
+            : null;
+        if (
+          parentSpan &&
+          parentSpan.tagName === 'SPAN' &&
+          parentSpan.textContent === '\u200B'
+        ) {
+          parentSpan.style.fontSize = `${clamped}px`;
+        } else {
+          const span = document.createElement('span');
+          span.style.fontSize = `${clamped}px`;
+          span.textContent = '\u200B';
+          range.insertNode(span);
+          const newRange = document.createRange();
+          newRange.setStart(span.firstChild!, 1);
+          newRange.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(newRange);
+          savedRangeRef.current = newRange.cloneRange();
+        }
       } else {
         document.execCommand('styleWithCSS', false, 'false');
         document.execCommand('fontSize', false, '7');
@@ -596,6 +605,10 @@ export default function App() {
           while (fontNode.firstChild) {
             span.appendChild(fontNode.firstChild);
           }
+          // Clear nested descendant font-size styles so the new size overrides cleanly
+          span.querySelectorAll<HTMLElement>('[style]').forEach((child) => {
+            child.style.fontSize = '';
+          });
           fontNode.parentNode?.replaceChild(span, fontNode);
         });
       }
@@ -653,12 +666,15 @@ export default function App() {
     }, 3200);
   }, []);
 
-  // Handle native editor input & auto-correct
+  // Handle native editor input: character-by-character stack push + auto-correct
   const handleEditorInput = useCallback(
     (e: React.FormEvent<HTMLDivElement>) => {
       if (isRestoringRef.current || !editorRef.current) return;
 
       const inputEv = e.nativeEvent as InputEvent;
+      // Wait for IME composition completion so partial dead-keys don't pollute stack
+      if (inputEv?.isComposing) return;
+
       const insertedData = inputEv?.data || '';
       const inputType = inputEv?.inputType || '';
 
@@ -679,49 +695,134 @@ export default function App() {
         }
       }
 
-      // Ensure editor never becomes completely empty without a block element
+      // Ensure editor never becomes completely empty without a block element + caret
       if (editorRef.current.innerHTML.trim() === '') {
         editorRef.current.innerHTML = '<p><br></p>';
+        const firstP = editorRef.current.firstElementChild;
+        const sel = window.getSelection();
+        if (firstP && sel) {
+          const r = document.createRange();
+          r.setStart(firstP, 0);
+          r.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(r);
+          savedRangeRef.current = r.cloneRange();
+        }
       }
 
-      const html = editorRef.current.innerHTML;
-      persistCurrentDocument(html, title);
+      const prevPlainText = lastPlainTextRef.current.replace(/\u200B/g, '');
+      const currPlainText = (editorRef.current.innerText || '').replace(/\u200B/g, '');
+
+      let actionLabel = 'Edited character';
+      if (correctionMatch) {
+        actionLabel = `Auto-correct "${correctionMatch.from}" → "${correctionMatch.to}"`;
+      } else if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+        actionLabel = 'New line';
+      } else if (inputType === 'insertFromPaste') {
+        actionLabel = 'Pasted content';
+      } else if (inputType.startsWith('delete')) {
+        if (prevPlainText.length - currPlainText.length === 1) {
+          let diffIdx = 0;
+          while (
+            diffIdx < currPlainText.length &&
+            prevPlainText[diffIdx] === currPlainText[diffIdx]
+          ) {
+            diffIdx++;
+          }
+          const deletedChar = prevPlainText[diffIdx];
+          actionLabel =
+            deletedChar === ' '
+              ? 'Deleted space'
+              : deletedChar === '\n'
+              ? 'Deleted line break'
+              : `Deleted '${deletedChar}'`;
+        } else {
+          actionLabel = 'Deleted text';
+        }
+      } else if (insertedData) {
+        if (insertedData === ' ') {
+          actionLabel = 'Typed space';
+        } else if (insertedData.length === 1) {
+          actionLabel = `Typed '${insertedData}'`;
+        } else {
+          actionLabel = `Typed "${insertedData.slice(0, 16)}"`;
+        }
+      }
+
+      pushStackSnapshot(actionLabel);
       updateStatsAndOutline();
       updateActiveFormats();
-
-      if (correctionMatch) {
-        pushStackSnapshot(`Auto-correct "${correctionMatch.from}" → "${correctionMatch.to}"`);
-      } else if (
-        inputType === 'insertParagraph' ||
-        inputType === 'insertFromPaste' ||
-        insertedData === ' '
-      ) {
-        pushStackSnapshot(
-          inputType === 'insertFromPaste'
-            ? 'Pasted content'
-            : inputType === 'insertParagraph'
-            ? 'New paragraph'
-            : 'Typed word'
-        );
-      } else {
-        scheduleTypingSnapshot('Typed text');
-      }
     },
     [
       autoCapitalize,
       autoCorrectEnabled,
-      persistCurrentDocument,
       pushStackSnapshot,
       recordAutoCorrect,
       rules,
-      scheduleTypingSnapshot,
-      title,
       updateActiveFormats,
       updateStatsAndOutline,
     ]
   );
 
-  // Keyboard shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+B/I/U, Ctrl+F)
+  // Commit IME composition as a snapshot when finished
+  const handleCompositionEnd = useCallback(() => {
+    if (isRestoringRef.current || !editorRef.current) return;
+    pushStackSnapshot('Typed text');
+    updateStatsAndOutline();
+    updateActiveFormats();
+  }, [pushStackSnapshot, updateActiveFormats, updateStatsAndOutline]);
+
+  // Sanitize pasted HTML so external pages cannot inject scripts or off-theme backgrounds
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
+      const el = editorRef.current;
+      if (!el) return;
+      const html = e.clipboardData.getData('text/html');
+      const plain = e.clipboardData.getData('text/plain');
+      if (!html && !plain) return;
+
+      e.preventDefault();
+      if (html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc.querySelectorAll('script, style, iframe, object, embed, meta, link').forEach((n) => n.remove());
+        doc.body.querySelectorAll<HTMLElement>('*').forEach((node) => {
+          Array.from(node.attributes).forEach((attr) => {
+            if (attr.name.toLowerCase().startsWith('on')) {
+              node.removeAttribute(attr.name);
+            }
+          });
+          node.style.backgroundColor = '';
+          node.style.background = '';
+          node.style.fontFamily = '';
+        });
+        document.execCommand('insertHTML', false, doc.body.innerHTML);
+      } else {
+        document.execCommand('insertText', false, plain);
+      }
+
+      pushStackSnapshot('Pasted content');
+      updateStatsAndOutline();
+      updateActiveFormats();
+    },
+    [pushStackSnapshot, updateActiveFormats, updateStatsAndOutline]
+  );
+
+  // Intercept browser's built-in contentEditable Undo/Redo so it always uses our SimpleStack
+  const handleBeforeInput = useCallback(
+    (e: React.FormEvent<HTMLDivElement>) => {
+      const native = e.nativeEvent as InputEvent;
+      if (native?.inputType === 'historyUndo') {
+        e.preventDefault();
+        handleUndo();
+      } else if (native?.inputType === 'historyRedo') {
+        e.preventDefault();
+        handleRedo();
+      }
+    },
+    [handleRedo, handleUndo]
+  );
+
+  // Keyboard shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+B/I/U)
   const handleEditorKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -729,11 +830,13 @@ export default function App() {
         const key = e.key.toLowerCase();
         if (key === 'z' && !e.shiftKey) {
           e.preventDefault();
+          e.stopPropagation();
           handleUndo();
           return;
         }
         if (key === 'y' || (key === 'z' && e.shiftKey)) {
           e.preventDefault();
+          e.stopPropagation();
           handleRedo();
           return;
         }
@@ -757,20 +860,37 @@ export default function App() {
     [handleExecCommand, handleRedo, handleUndo]
   );
 
-  // Global shortcut for Find & Replace (Ctrl+F) and Undo/Redo when focus is outside inputs
+  // Global shortcuts for Find & Replace (Ctrl+F) and Undo/Redo when focus is outside inputs
   useEffect(() => {
     const onGlobalKeyDown = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'f') {
+      if (!mod) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'f') {
         e.preventDefault();
         setShowFindReplace((prev) => !prev);
+        return;
+      }
+
+      const target = e.target;
+      const isTextInput =
+        target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      if (isTextInput) return;
+
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        handleRedo();
       }
     };
     window.addEventListener('keydown', onGlobalKeyDown);
     return () => window.removeEventListener('keydown', onGlobalKeyDown);
-  }, []);
+  }, [handleRedo, handleUndo]);
 
-  // Virtual Keyboard Handlers
+  // Virtual Keyboard Handlers (character-by-character stack push)
   const handleVirtualInsert = useCallback(
     (char: string) => {
       const el = editorRef.current;
@@ -778,11 +898,11 @@ export default function App() {
       restoreSelection();
       document.execCommand('insertText', false, char);
 
-      let corrected = false;
+      let correctionMatch: { from: string; to: string } | null = null;
       if (autoCorrectEnabled && /^[\s\u00A0.,;:!?)]$/.test(char)) {
         const match = applyAutoCorrectAtCaret(el, rules, autoCapitalize);
         if (match) {
-          corrected = true;
+          correctionMatch = match;
           recordAutoCorrect(match.from, match.to);
         }
       }
@@ -792,28 +912,23 @@ export default function App() {
         savedRangeRef.current = sel.getRangeAt(0).cloneRange();
       }
 
-      persistCurrentDocument(el.innerHTML, title);
+      const label = correctionMatch
+        ? `Auto-correct "${correctionMatch.from}" → "${correctionMatch.to}"`
+        : char === ' '
+        ? 'Typed space'
+        : `Typed '${char}'`;
+
+      pushStackSnapshot(label);
       updateStatsAndOutline();
       updateActiveFormats();
-
-      if (corrected) {
-        pushStackSnapshot('Auto-correct (Virtual Keys)');
-      } else if (char === ' ') {
-        pushStackSnapshot('Typed word (Virtual Keys)');
-      } else {
-        scheduleTypingSnapshot('Typed (Virtual Keys)');
-      }
     },
     [
       autoCapitalize,
       autoCorrectEnabled,
-      persistCurrentDocument,
       pushStackSnapshot,
       recordAutoCorrect,
       restoreSelection,
       rules,
-      scheduleTypingSnapshot,
-      title,
       updateActiveFormats,
       updateStatsAndOutline,
     ]
@@ -823,23 +938,50 @@ export default function App() {
     const el = editorRef.current;
     if (!el) return;
     restoreSelection();
+    const prevPlainText = (el.innerText || '').replace(/\u200B/g, '');
     document.execCommand('delete', false);
     if (el.innerHTML.trim() === '') {
       el.innerHTML = '<p><br></p>';
+      const firstP = el.firstElementChild;
+      const sel = window.getSelection();
+      if (firstP && sel) {
+        const r = document.createRange();
+        r.setStart(firstP, 0);
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
     }
+    const currPlainText = (el.innerText || '').replace(/\u200B/g, '');
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0) {
       savedRangeRef.current = sel.getRangeAt(0).cloneRange();
     }
-    persistCurrentDocument(el.innerHTML, title);
+
+    let label = 'Deleted character';
+    if (prevPlainText.length - currPlainText.length === 1) {
+      let diffIdx = 0;
+      while (
+        diffIdx < currPlainText.length &&
+        prevPlainText[diffIdx] === currPlainText[diffIdx]
+      ) {
+        diffIdx++;
+      }
+      const deletedChar = prevPlainText[diffIdx];
+      label =
+        deletedChar === ' '
+          ? 'Deleted space'
+          : deletedChar === '\n'
+          ? 'Deleted line break'
+          : `Deleted '${deletedChar}'`;
+    }
+
+    pushStackSnapshot(label);
     updateStatsAndOutline();
     updateActiveFormats();
-    scheduleTypingSnapshot('Deleted text');
   }, [
-    persistCurrentDocument,
+    pushStackSnapshot,
     restoreSelection,
-    scheduleTypingSnapshot,
-    title,
     updateActiveFormats,
     updateStatsAndOutline,
   ]);
@@ -932,16 +1074,14 @@ export default function App() {
 
   const handleDeleteDocument = useCallback(
     (id: string) => {
-      setDocuments((prev) => {
-        if (prev.length <= 1) return prev;
-        const remaining = prev.filter((d) => d.id !== id);
-        if (id === activeDocId && remaining.length > 0) {
-          setActiveDocId(remaining[0].id);
-        }
-        return remaining;
-      });
+      if (documents.length <= 1) return;
+      const remaining = documents.filter((d) => d.id !== id);
+      setDocuments(remaining);
+      if (id === activeDocId && remaining.length > 0) {
+        setActiveDocId(remaining[0].id);
+      }
     },
-    [activeDocId]
+    [activeDocId, documents]
   );
 
   const handleJumpToHeading = useCallback((headingIndex: number) => {
@@ -1055,6 +1195,9 @@ export default function App() {
         {/* Scrollable Document Sheet Viewport */}
         <main
           className="flex-1 overflow-y-auto bg-[#FAFAFA] px-3 sm:px-6 md:px-10 py-6 sm:py-8 relative print:p-0 print:bg-white print:overflow-visible"
+          onScroll={() => {
+            if (bubblePosition) setBubblePosition(null);
+          }}
           onClick={(e) => {
             if (e.target === e.currentTarget && editorRef.current) {
               editorRef.current.focus();
@@ -1111,7 +1254,10 @@ export default function App() {
                 spellCheck
                 inputMode={showVirtualKeyboard ? 'none' : 'text'}
                 data-placeholder="Begin writing your document..."
+                onBeforeInput={handleBeforeInput}
                 onInput={handleEditorInput}
+                onPaste={handlePaste}
+                onCompositionEnd={handleCompositionEnd}
                 onKeyDown={handleEditorKeyDown}
                 onMouseUp={updateActiveFormats}
                 onKeyUp={() => {

@@ -14,12 +14,20 @@ export interface DocumentItem {
   updatedAt: number;
 }
 
+export interface SavedSelection {
+  startPath: number[];
+  startOffset: number;
+  endPath: number[];
+  endOffset: number;
+}
+
 export interface StackSnapshot {
   id: string;
   title: string;
   html: string;
   actionLabel: string;
   timestamp: number;
+  selection?: SavedSelection;
 }
 
 export interface AutoCorrectRule {
