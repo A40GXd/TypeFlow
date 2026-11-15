@@ -29,6 +29,7 @@ import { FindReplaceBar } from './components/FindReplaceBar';
 import { RightInspector } from './components/RightInspector';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
 import { StatusFooter } from './components/StatusFooter';
+import { Analytics } from '@vercel/analytics/react';
 
 const STORAGE_DOCS_KEY = 'monograph_docs_v1';
 const STORAGE_ACTIVE_ID_KEY = 'monograph_active_doc_v1';
@@ -1340,6 +1341,7 @@ export default function App() {
         onZoomChange={setZoom}
         onToggleVirtualKeyboard={() => setShowVirtualKeyboard((v) => !v)}
       />
+      <Analytics />
     </div>
   );
 }
