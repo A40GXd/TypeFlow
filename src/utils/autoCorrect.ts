@@ -58,15 +58,210 @@ export const DEFAULT_AUTOCORRECT_RULES: AutoCorrectRule[] = [
   { id: 'p-7', trigger: '<-', replacement: '←', enabled: true, category: 'punctuation' },
 ];
 
+const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'BLOCKQUOTE', 'LI']);
+const DELIMITER_REGEX = /^[\s\u00A0.,;:!?)\]]$/;
+const WORD_ONLY_TRIGGER = /^[A-Za-z0-9']+$/;
+
 /** Preserve word casing when applying an auto-correct rule. */
 function matchWordCase(original: string, replacement: string): string {
   if (original.length > 1 && original === original.toUpperCase() && /[A-Z]/.test(original)) {
     return replacement.toUpperCase();
   }
-  if (original[0] && original[0] === original[0].toUpperCase() && original[0] !== original[0].toLowerCase()) {
+  if (
+    original[0] &&
+    original[0] === original[0].toUpperCase() &&
+    original[0] !== original[0].toLowerCase()
+  ) {
     return replacement[0].toUpperCase() + replacement.slice(1);
   }
   return replacement;
+}
+
+function getNearestBlock(editorEl: HTMLElement, node: Node): HTMLElement {
+  let curr: Node | null = node;
+  while (curr && curr !== editorEl) {
+    if (curr instanceof HTMLElement && BLOCK_TAGS.has(curr.tagName)) {
+      return curr;
+    }
+    curr = curr.parentNode;
+  }
+  return editorEl;
+}
+
+function getLastTextNode(root: Node): Text | null {
+  if (root.nodeType === Node.TEXT_NODE) {
+    return (root as Text).data.length > 0 ? (root as Text) : null;
+  }
+  for (let i = root.childNodes.length - 1; i >= 0; i--) {
+    const found = getLastTextNode(root.childNodes[i]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function resolveTextTargetAtCaret(
+  editorEl: HTMLElement,
+  range: Range
+): { textNode: Text; caretOffset: number } | null {
+  const { startContainer, startOffset } = range;
+  if (!editorEl.contains(startContainer)) return null;
+
+  if (startContainer.nodeType === Node.TEXT_NODE) {
+    const t = startContainer as Text;
+    if (startOffset > 0) {
+      return { textNode: t, caretOffset: startOffset };
+    }
+    // Offset is 0: look at previous text node inside same block
+    const block = getNearestBlock(editorEl, t);
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let prev: Text | null = null;
+    let curr = walker.nextNode();
+    while (curr) {
+      if (curr === t) break;
+      if ((curr as Text).data.length > 0) prev = curr as Text;
+      curr = walker.nextNode();
+    }
+    return prev ? { textNode: prev, caretOffset: prev.data.length } : null;
+  }
+
+  if (startContainer.nodeType === Node.ELEMENT_NODE) {
+    const el = startContainer as HTMLElement;
+    for (let i = startOffset - 1; i >= 0; i--) {
+      const found = getLastTextNode(el.childNodes[i]);
+      if (found) {
+        return { textNode: found, caretOffset: found.data.length };
+      }
+    }
+  }
+
+  return null;
+}
+
+function getBlockPrefixBeforeOffset(
+  editorEl: HTMLElement,
+  textNode: Text,
+  offset: number
+): string {
+  const container = getNearestBlock(editorEl, textNode);
+  const range = document.createRange();
+  range.setStart(container, 0);
+  range.setEnd(textNode, offset);
+  return range.toString().replace(/\u200B/g, '');
+}
+
+function applyCorrectionInTextNode(
+  editorEl: HTMLElement,
+  textNode: Text,
+  caretOffset: number,
+  beforeDelimiter: string,
+  suffixChar: string,
+  rules: AutoCorrectRule[],
+  autoCapitalize: boolean
+): { match: AutoCorrectMatch; newCaretOffset: number } | null {
+  const activeRules = rules.filter((r) => r.enabled);
+
+  // Strip leading zero-width spaces cleanly for matching while keeping exact indices
+  // 1. Check punctuation/symbol rules AND any custom rules containing symbols or spaces
+  for (const rule of activeRules) {
+    const isSymbolOrPhraseRule =
+      rule.category === 'punctuation' || !WORD_ONLY_TRIGGER.test(rule.trigger);
+    if (!isSymbolOrPhraseRule) continue;
+
+    if (beforeDelimiter.endsWith(rule.trigger)) {
+      const startIdx = beforeDelimiter.length - rule.trigger.length;
+      const charBefore = startIdx > 0 ? beforeDelimiter[startIdx - 1] : '';
+
+      // Avoid converting triple-dash "---" via "--"
+      if (rule.trigger === '--' && charBefore === '-') continue;
+
+      // For custom word-like/phrase rules with spaces, require word boundary before startIdx
+      if (rule.category === 'custom' && /^[A-Za-z0-9]/.test(rule.trigger)) {
+        if (charBefore && /[A-Za-z0-9']/.test(charBefore)) continue;
+      }
+
+      const nextText =
+        textNode.data.slice(0, startIdx) +
+        rule.replacement +
+        suffixChar +
+        textNode.data.slice(caretOffset);
+
+      const delta = rule.replacement.length - rule.trigger.length;
+      textNode.data = nextText;
+
+      return {
+        match: { from: rule.trigger, to: rule.replacement },
+        newCaretOffset: caretOffset + delta,
+      };
+    }
+  }
+
+  // 2. Check word-level spelling & custom word rules
+  const wordMatch = beforeDelimiter.match(/([A-Za-z0-9']+)$/);
+  if (!wordMatch) return null;
+
+  const rawWord = wordMatch[1];
+  const wordStartIdx = beforeDelimiter.length - rawWord.length;
+  const lowerWord = rawWord.toLowerCase();
+
+  const fullPrefix = getBlockPrefixBeforeOffset(editorEl, textNode, wordStartIdx);
+  const isSentenceStart =
+    fullPrefix.trim().length === 0 || /[.!?]\s+$/.test(fullPrefix);
+
+  for (const rule of activeRules) {
+    if (rule.category !== 'punctuation' && WORD_ONLY_TRIGGER.test(rule.trigger)) {
+      if (rule.trigger.toLowerCase() === lowerWord) {
+        let replacement = rule.replacement;
+        if (rule.trigger.toLowerCase() !== 'i' && rule.trigger.toLowerCase() !== 'im') {
+          replacement = matchWordCase(rawWord, rule.replacement);
+        }
+
+        // Also apply sentence-start capitalization to the corrected word if needed
+        if (
+          autoCapitalize &&
+          isSentenceStart &&
+          replacement[0] &&
+          /^[a-z]/.test(replacement[0])
+        ) {
+          replacement = replacement[0].toUpperCase() + replacement.slice(1);
+        }
+
+        if (replacement !== rawWord) {
+          const nextText =
+            textNode.data.slice(0, wordStartIdx) +
+            replacement +
+            suffixChar +
+            textNode.data.slice(caretOffset);
+
+          const delta = replacement.length - rawWord.length;
+          textNode.data = nextText;
+
+          return {
+            match: { from: rawWord, to: replacement },
+            newCaretOffset: caretOffset + delta,
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Auto-capitalize start of sentence or block
+  if (autoCapitalize && /^[a-z]/.test(rawWord) && isSentenceStart) {
+    const capitalized = rawWord[0].toUpperCase() + rawWord.slice(1);
+    if (capitalized !== rawWord) {
+      textNode.data =
+        textNode.data.slice(0, wordStartIdx) +
+        capitalized +
+        suffixChar +
+        textNode.data.slice(caretOffset);
+
+      return {
+        match: { from: rawWord, to: capitalized },
+        newCaretOffset: caretOffset,
+      };
+    }
+  }
+
+  return null;
 }
 
 export interface AutoCorrectMatch {
@@ -75,7 +270,7 @@ export interface AutoCorrectMatch {
 }
 
 /**
- * Inspect the text immediately preceding the current caret inside a Text node,
+ * Inspect the text immediately preceding the current caret (after typing space or punctuation),
  * and apply matching auto-correct or sentence capitalization rules.
  */
 export function applyAutoCorrectAtCaret(
@@ -89,135 +284,85 @@ export function applyAutoCorrectAtCaret(
   const range = selection.getRangeAt(0);
   if (!range.collapsed) return null;
 
-  const container = range.startContainer;
-  if (container.nodeType !== Node.TEXT_NODE) return null;
-  if (!editorEl.contains(container)) return null;
+  const resolved = resolveTextTargetAtCaret(editorEl, range);
+  if (!resolved) return null;
 
-  const textNode = container as Text;
-  const caretOffset = range.startOffset;
+  const { textNode, caretOffset } = resolved;
   const textBefore = textNode.data.slice(0, caretOffset);
-
-  // Trigger character is the character just inserted (space, nbsp, or punctuation)
   if (!textBefore || textBefore.length < 2) return null;
+
   const triggerChar = textBefore[textBefore.length - 1];
-  const isDelimiter = /^[\s\u00A0.,;:!?)]$/.test(triggerChar);
-  if (!isDelimiter) return null;
+  if (!DELIMITER_REGEX.test(triggerChar)) return null;
 
   const beforeDelimiter = textBefore.slice(0, -1);
 
-  // 1. Check typographic punctuation triggers (e.g., "--", "...", "(c)", "->")
-  const activeRules = rules.filter((r) => r.enabled);
-  for (const rule of activeRules) {
-    if (rule.category === 'punctuation') {
-      if (beforeDelimiter.endsWith(rule.trigger)) {
-        const startIdx = beforeDelimiter.length - rule.trigger.length;
-        const charBefore = startIdx > 0 ? beforeDelimiter[startIdx - 1] : '';
-        if (rule.trigger === '--' && charBefore === '-') continue; // avoid triple dash
+  const result = applyCorrectionInTextNode(
+    editorEl,
+    textNode,
+    caretOffset,
+    beforeDelimiter,
+    triggerChar,
+    rules,
+    autoCapitalize
+  );
 
-        const nextText =
-          textNode.data.slice(0, startIdx) +
-          rule.replacement +
-          triggerChar +
-          textNode.data.slice(caretOffset);
+  if (!result) return null;
 
-        const delta = rule.replacement.length - rule.trigger.length;
-        textNode.data = nextText;
+  const newRange = document.createRange();
+  newRange.setStart(
+    textNode,
+    Math.max(0, Math.min(result.newCaretOffset, textNode.data.length))
+  );
+  newRange.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(newRange);
 
-        const newRange = document.createRange();
-        newRange.setStart(textNode, caretOffset + delta);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
-
-        return { from: rule.trigger, to: rule.replacement };
-      }
-    }
-  }
-
-  // 2. Check word-level spelling & custom rules
-  const wordMatch = beforeDelimiter.match(/([A-Za-z0-9']+)$/);
-  if (!wordMatch) return null;
-
-  const rawWord = wordMatch[1];
-  const wordStartIdx = beforeDelimiter.length - rawWord.length;
-  const lowerWord = rawWord.toLowerCase();
-
-  for (const rule of activeRules) {
-    if (rule.category !== 'punctuation' && rule.trigger.toLowerCase() === lowerWord) {
-      let replacement = rule.replacement;
-      // Only preserve case if rule replacement isn't strictly mixed-case like "I'm" or "I"
-      if (rule.trigger !== 'i' && rule.trigger !== 'im') {
-        replacement = matchWordCase(rawWord, rule.replacement);
-      }
-
-      if (replacement !== rawWord) {
-        const nextText =
-          textNode.data.slice(0, wordStartIdx) +
-          replacement +
-          triggerChar +
-          textNode.data.slice(caretOffset);
-
-        const delta = replacement.length - rawWord.length;
-        textNode.data = nextText;
-
-        const newRange = document.createRange();
-        newRange.setStart(textNode, caretOffset + delta);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
-
-        return { from: rawWord, to: replacement };
-      }
-    }
-  }
-
-  // 3. Auto-capitalize start of sentence or block
-  if (autoCapitalize && /^[a-z]/.test(rawWord)) {
-    const fullPrefix = getBlockPrefixBeforeOffset(editorEl, textNode, wordStartIdx);
-    const isSentenceStart =
-      fullPrefix.trim().length === 0 || /[.!?]\s+$/.test(fullPrefix);
-
-    if (isSentenceStart) {
-      const capitalized = rawWord[0].toUpperCase() + rawWord.slice(1);
-      if (capitalized !== rawWord) {
-        textNode.data =
-          textNode.data.slice(0, wordStartIdx) +
-          capitalized +
-          triggerChar +
-          textNode.data.slice(caretOffset);
-
-        const newRange = document.createRange();
-        newRange.setStart(textNode, caretOffset);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
-
-        return { from: rawWord, to: capitalized };
-      }
-    }
-  }
-
-  return null;
+  return result.match;
 }
 
-function getBlockPrefixBeforeOffset(
+/**
+ * Apply auto-correct to the trailing word of the previous paragraph/block
+ * right after the user presses Enter / Return.
+ */
+export function applyAutoCorrectOnPreviousBlock(
   editorEl: HTMLElement,
-  textNode: Text,
-  offset: number
-): string {
-  let block: Node | null = textNode.parentNode;
-  while (block && block !== editorEl) {
-    if (
-      block instanceof HTMLElement &&
-      ['P', 'DIV', 'H1', 'H2', 'H3', 'BLOCKQUOTE', 'LI'].includes(block.tagName)
-    ) {
-      break;
-    }
-    block = block.parentNode;
+  rules: AutoCorrectRule[],
+  autoCapitalize: boolean
+): AutoCorrectMatch | null {
+  const selection = window.getSelection();
+  if (!selection || !selection.rangeCount) return null;
+
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed) return null;
+
+  const currentBlock = getNearestBlock(editorEl, range.startContainer);
+  let targetBlock: Element | null = null;
+
+  if (currentBlock !== editorEl) {
+    targetBlock = currentBlock.previousElementSibling;
+  } else if (range.startOffset > 0) {
+    const prevNode = editorEl.childNodes[range.startOffset - 1];
+    if (prevNode instanceof Element) targetBlock = prevNode;
   }
-  const container = block || editorEl;
-  const range = document.createRange();
-  range.setStart(container, 0);
-  range.setEnd(textNode, offset);
-  return range.toString().replace(/\u200B/g, '');
+
+  if (!targetBlock) return null;
+
+  const lastText = getLastTextNode(targetBlock);
+  if (!lastText || lastText.data.trim().length === 0) return null;
+
+  // Only correct if there isn't trailing whitespace after the word
+  const trimmedRight = lastText.data.replace(/[\u200B]+$/, '');
+  if (!trimmedRight || /\s$/.test(trimmedRight)) return null;
+
+  const result = applyCorrectionInTextNode(
+    editorEl,
+    lastText,
+    lastText.data.length,
+    trimmedRight,
+    '',
+    rules,
+    autoCapitalize
+  );
+
+  return result ? result.match : null;
 }

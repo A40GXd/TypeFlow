@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Undo2,
   Redo2,
@@ -110,21 +111,66 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
   const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
   const [blockMenuOpen, setBlockMenuOpen] = useState(false);
 
+  const [blockMenuPos, setBlockMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [sizeMenuPos, setSizeMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [colorMenuPos, setColorMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+
   const exportRef = useRef<HTMLDivElement>(null);
   const colorRef = useRef<HTMLDivElement>(null);
   const sizeRef = useRef<HTMLDivElement>(null);
   const blockRef = useRef<HTMLDivElement>(null);
 
+  const colorMenuRef = useRef<HTMLDivElement>(null);
+  const sizeMenuRef = useRef<HTMLDivElement>(null);
+  const blockMenuRef = useRef<HTMLDivElement>(null);
+
+  const computeMenuPosition = (triggerEl: HTMLElement, menuWidth: number, offset = 4) => {
+    const rect = triggerEl.getBoundingClientRect();
+    const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
+    const clampedLeft = Math.min(Math.max(8, rect.left), maxLeft);
+    return {
+      top: rect.bottom + offset,
+      left: clampedLeft,
+    };
+  };
+
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
       if (exportRef.current && !exportRef.current.contains(target)) setExportOpen(false);
-      if (colorRef.current && !colorRef.current.contains(target)) setColorOpen(false);
-      if (sizeRef.current && !sizeRef.current.contains(target)) setSizeMenuOpen(false);
-      if (blockRef.current && !blockRef.current.contains(target)) setBlockMenuOpen(false);
+      if (
+        colorRef.current &&
+        !colorRef.current.contains(target) &&
+        (!colorMenuRef.current || !colorMenuRef.current.contains(target))
+      ) {
+        setColorOpen(false);
+      }
+      if (
+        sizeRef.current &&
+        !sizeRef.current.contains(target) &&
+        (!sizeMenuRef.current || !sizeMenuRef.current.contains(target))
+      ) {
+        setSizeMenuOpen(false);
+      }
+      if (
+        blockRef.current &&
+        !blockRef.current.contains(target) &&
+        (!blockMenuRef.current || !blockMenuRef.current.contains(target))
+      ) {
+        setBlockMenuOpen(false);
+      }
+    };
+    const handleResize = () => {
+      setColorOpen(false);
+      setSizeMenuOpen(false);
+      setBlockMenuOpen(false);
     };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('resize', handleResize);
+    };
   }, []);
 
   const preserveSelection = (e: React.MouseEvent) => {
@@ -292,7 +338,14 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
       </div>
 
       {/* Row 2: MS Word-style Architectural Formatting Ribbon (42px) */}
-      <div className="h-[42px] px-3 flex items-center gap-1 overflow-x-auto no-scrollbar bg-white">
+      <div
+        className="h-[42px] px-3 flex items-center gap-1 overflow-x-auto no-scrollbar bg-white"
+        onScroll={() => {
+          if (blockMenuOpen) setBlockMenuOpen(false);
+          if (sizeMenuOpen) setSizeMenuOpen(false);
+          if (colorOpen) setColorOpen(false);
+        }}
+      >
         {/* Group 1: Stack Undo / Redo */}
         <div className="flex items-center gap-0.5 pr-2 shrink-0">
           <button
@@ -326,7 +379,16 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
             <button
               type="button"
               onMouseDown={preserveSelection}
-              onClick={() => setBlockMenuOpen((v) => !v)}
+              onClick={(e) => {
+                if (blockMenuOpen) {
+                  setBlockMenuOpen(false);
+                } else {
+                  setBlockMenuPos(computeMenuPosition(e.currentTarget, 160, 4));
+                  setSizeMenuOpen(false);
+                  setColorOpen(false);
+                  setBlockMenuOpen(true);
+                }
+              }}
               title="Paragraph & Heading Style"
               className="h-7 px-2 flex items-center gap-1.5 rounded-[4px] border border-[#E4E4E7] bg-white hover:bg-[#F4F4F5] hover:border-[#18181B] text-[12px] font-medium text-[#09090B] transition-colors whitespace-nowrap"
             >
@@ -334,29 +396,35 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
               <ChevronDown className="w-3 h-3 text-[#71717A]" />
             </button>
 
-            {blockMenuOpen && (
-              <div className="absolute left-0 mt-1 w-40 bg-white border border-[#18181B] rounded-[8px] popover-shadow py-1 z-50">
-                {(['p', 'h1', 'h2', 'h3', 'blockquote'] as BlockTag[]).map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onMouseDown={preserveSelection}
-                    onClick={() => {
-                      onBlockTag(tag);
-                      setBlockMenuOpen(false);
-                    }}
-                    className={`w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between hover:bg-[#F4F4F5] ${
-                      formats.blockTag === tag
-                        ? 'font-semibold text-[#09090B] bg-[#F4F4F5]'
-                        : 'text-[#47464A]'
-                    }`}
-                  >
-                    <span>{blockLabelMap[tag]}</span>
-                    <span className="font-mono text-[10px] text-[#71717A] uppercase">{tag}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {blockMenuOpen &&
+              createPortal(
+                <div
+                  ref={blockMenuRef}
+                  style={{ top: blockMenuPos.top, left: blockMenuPos.left }}
+                  className="fixed w-40 bg-white border border-[#18181B] rounded-[8px] popover-shadow py-1 z-[60]"
+                >
+                  {(['p', 'h1', 'h2', 'h3', 'blockquote'] as BlockTag[]).map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onMouseDown={preserveSelection}
+                      onClick={() => {
+                        onBlockTag(tag);
+                        setBlockMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between hover:bg-[#F4F4F5] ${
+                        formats.blockTag === tag
+                          ? 'font-semibold text-[#09090B] bg-[#F4F4F5]'
+                          : 'text-[#47464A]'
+                      }`}
+                    >
+                      <span>{blockLabelMap[tag]}</span>
+                      <span className="font-mono text-[10px] text-[#71717A] uppercase">{tag}</span>
+                    </button>
+                  ))}
+                </div>,
+                document.body
+              )}
           </div>
 
           {/* Adjustable Font Size Stepper + Dropdown */}
@@ -375,35 +443,50 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
               <button
                 type="button"
                 onMouseDown={preserveSelection}
-                onClick={() => setSizeMenuOpen((v) => !v)}
+                onClick={(e) => {
+                  if (sizeMenuOpen) {
+                    setSizeMenuOpen(false);
+                  } else {
+                    setSizeMenuPos(computeMenuPosition(e.currentTarget, 96, 4));
+                    setBlockMenuOpen(false);
+                    setColorOpen(false);
+                    setSizeMenuOpen(true);
+                  }
+                }}
                 title="Select font size"
                 className="h-7 px-1.5 min-w-[44px] flex items-center justify-center gap-0.5 font-mono text-[11.5px] font-medium tabular-nums text-[#09090B] hover:bg-[#F4F4F5] border-x border-[#E4E4E7] transition-colors"
               >
                 <span>{formats.fontSize}px</span>
               </button>
 
-              {sizeMenuOpen && (
-                <div className="absolute left-0 mt-1 w-24 max-h-56 overflow-y-auto bg-white border border-[#18181B] rounded-[8px] popover-shadow py-1 z-50">
-                  {FONT_SIZE_OPTIONS.map((sz) => (
-                    <button
-                      key={sz}
-                      type="button"
-                      onMouseDown={preserveSelection}
-                      onClick={() => {
-                        onFontSizeChange(sz);
-                        setSizeMenuOpen(false);
-                      }}
-                      className={`w-full px-3 py-1 text-left font-mono text-[12px] tabular-nums hover:bg-[#F4F4F5] ${
-                        formats.fontSize === sz
-                          ? 'bg-[#09090B] text-white'
-                          : 'text-[#09090B]'
-                      }`}
-                    >
-                      {sz}px
-                    </button>
-                  ))}
-                </div>
-              )}
+              {sizeMenuOpen &&
+                createPortal(
+                  <div
+                    ref={sizeMenuRef}
+                    style={{ top: sizeMenuPos.top, left: sizeMenuPos.left }}
+                    className="fixed w-24 max-h-56 overflow-y-auto bg-white border border-[#18181B] rounded-[8px] popover-shadow py-1 z-[60]"
+                  >
+                    {FONT_SIZE_OPTIONS.map((sz) => (
+                      <button
+                        key={sz}
+                        type="button"
+                        onMouseDown={preserveSelection}
+                        onClick={() => {
+                          onFontSizeChange(sz);
+                          setSizeMenuOpen(false);
+                        }}
+                        className={`w-full px-3 py-1 text-left font-mono text-[12px] tabular-nums hover:bg-[#F4F4F5] ${
+                          formats.fontSize === sz
+                            ? 'bg-[#09090B] text-white'
+                            : 'text-[#09090B]'
+                        }`}
+                      >
+                        {sz}px
+                      </button>
+                    ))}
+                  </div>,
+                  document.body
+                )}
             </div>
 
             <button
@@ -482,7 +565,16 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
             <button
               type="button"
               onMouseDown={preserveSelection}
-              onClick={() => setColorOpen((v) => !v)}
+              onClick={(e) => {
+                if (colorOpen) {
+                  setColorOpen(false);
+                } else {
+                  setColorMenuPos(computeMenuPosition(e.currentTarget, 208, 6));
+                  setBlockMenuOpen(false);
+                  setSizeMenuOpen(false);
+                  setColorOpen(true);
+                }
+              }}
               title="Font Colour"
               className="w-8 h-7 flex flex-col items-center justify-center rounded-[4px] hover:bg-[#F4F4F5] transition-colors relative"
             >
@@ -493,55 +585,61 @@ export const RibbonToolbar: React.FC<RibbonToolbarProps> = ({
               />
             </button>
 
-            {colorOpen && (
-              <div className="absolute left-0 mt-1.5 w-52 bg-white border border-[#18181B] rounded-[8px] popover-shadow p-2.5 z-50">
-                <div className="text-[11px] font-medium text-[#71717A] mb-2">
-                  Text Ink Colour
-                </div>
-                <div className="grid grid-cols-5 gap-1.5 mb-2.5">
-                  {TEXT_COLOR_SWATCHES.map((swatch) => (
+            {colorOpen &&
+              createPortal(
+                <div
+                  ref={colorMenuRef}
+                  style={{ top: colorMenuPos.top, left: colorMenuPos.left }}
+                  className="fixed w-52 bg-white border border-[#18181B] rounded-[8px] popover-shadow p-2.5 z-[60]"
+                >
+                  <div className="text-[11px] font-medium text-[#71717A] mb-2">
+                    Text Ink Colour
+                  </div>
+                  <div className="grid grid-cols-5 gap-1.5 mb-2.5">
+                    {TEXT_COLOR_SWATCHES.map((swatch) => (
+                      <button
+                        key={swatch.hex}
+                        type="button"
+                        onMouseDown={preserveSelection}
+                        onClick={() => {
+                          onFontColorChange(swatch.hex);
+                          setColorOpen(false);
+                        }}
+                        title={swatch.label}
+                        className={`w-7 h-7 rounded-[4px] border transition-transform hover:scale-105 ${
+                          formats.fontColor.toLowerCase() === swatch.hex.toLowerCase()
+                            ? 'border-[#09090B] ring-1 ring-[#09090B] ring-offset-1'
+                            : 'border-[#E4E4E7]'
+                        }`}
+                        style={{ backgroundColor: swatch.hex }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between pt-2 border-t border-[#E4E4E7]">
+                    <label className="text-[11px] text-[#47464A] flex items-center gap-2 cursor-pointer">
+                      <span>Custom:</span>
+                      <input
+                        type="color"
+                        value={formats.fontColor}
+                        onChange={(e) => onFontColorChange(e.target.value)}
+                        className="w-6 h-5 p-0 border border-[#E4E4E7] rounded-[3px] cursor-pointer bg-white"
+                      />
+                    </label>
                     <button
-                      key={swatch.hex}
                       type="button"
                       onMouseDown={preserveSelection}
                       onClick={() => {
-                        onFontColorChange(swatch.hex);
+                        onFontColorChange('#09090B');
                         setColorOpen(false);
                       }}
-                      title={swatch.label}
-                      className={`w-7 h-7 rounded-[4px] border transition-transform hover:scale-105 ${
-                        formats.fontColor.toLowerCase() === swatch.hex.toLowerCase()
-                          ? 'border-[#09090B] ring-1 ring-[#09090B] ring-offset-1'
-                          : 'border-[#E4E4E7]'
-                      }`}
-                      style={{ backgroundColor: swatch.hex }}
-                    />
-                  ))}
-                </div>
-                <div className="flex items-center justify-between pt-2 border-t border-[#E4E4E7]">
-                  <label className="text-[11px] text-[#47464A] flex items-center gap-2 cursor-pointer">
-                    <span>Custom:</span>
-                    <input
-                      type="color"
-                      value={formats.fontColor}
-                      onChange={(e) => onFontColorChange(e.target.value)}
-                      className="w-6 h-5 p-0 border border-[#E4E4E7] rounded-[3px] cursor-pointer bg-white"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    onMouseDown={preserveSelection}
-                    onClick={() => {
-                      onFontColorChange('#09090B');
-                      setColorOpen(false);
-                    }}
-                    className="text-[11px] font-medium text-[#09090B] hover:underline"
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-            )}
+                      className="text-[11px] font-medium text-[#09090B] hover:underline"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>,
+                document.body
+              )}
           </div>
 
           <button

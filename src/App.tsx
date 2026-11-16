@@ -19,6 +19,7 @@ import {
 import {
   DEFAULT_AUTOCORRECT_RULES,
   applyAutoCorrectAtCaret,
+  applyAutoCorrectOnPreviousBlock,
 } from './utils/autoCorrect';
 import { exportAsPdf, exportAsTxt } from './utils/exportDocument';
 import { INITIAL_DOCUMENTS } from './utils/sampleDocuments';
@@ -679,19 +680,30 @@ export default function App() {
       const inputType = inputEv?.inputType || '';
 
       let correctionMatch: { from: string; to: string } | null = null;
-      if (
-        autoCorrectEnabled &&
-        (inputType === 'insertText' || inputType === 'insertCompositionText') &&
-        /^[\s\u00A0.,;:!?)]$/.test(insertedData)
-      ) {
-        const match = applyAutoCorrectAtCaret(
-          editorRef.current,
-          rules,
-          autoCapitalize
-        );
-        if (match) {
-          correctionMatch = match;
-          recordAutoCorrect(match.from, match.to);
+      if (autoCorrectEnabled) {
+        if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+          const match = applyAutoCorrectOnPreviousBlock(
+            editorRef.current,
+            rules,
+            autoCapitalize
+          );
+          if (match) {
+            correctionMatch = match;
+            recordAutoCorrect(match.from, match.to);
+          }
+        } else if (
+          (inputType === 'insertText' || inputType === 'insertCompositionText') &&
+          (!insertedData || /[\s\u00A0.,;:!?)\]]$/.test(insertedData))
+        ) {
+          const match = applyAutoCorrectAtCaret(
+            editorRef.current,
+            rules,
+            autoCapitalize
+          );
+          if (match) {
+            correctionMatch = match;
+            recordAutoCorrect(match.from, match.to);
+          }
         }
       }
 
@@ -899,7 +911,7 @@ export default function App() {
       document.execCommand('insertText', false, char);
 
       let correctionMatch: { from: string; to: string } | null = null;
-      if (autoCorrectEnabled && /^[\s\u00A0.,;:!?)]$/.test(char)) {
+      if (autoCorrectEnabled && /^[\s\u00A0.,;:!?)\]]$/.test(char)) {
         const match = applyAutoCorrectAtCaret(el, rules, autoCapitalize);
         if (match) {
           correctionMatch = match;
@@ -991,14 +1003,37 @@ export default function App() {
     if (!el) return;
     restoreSelection();
     document.execCommand('insertParagraph', false);
+
+    let correctionMatch: { from: string; to: string } | null = null;
+    if (autoCorrectEnabled) {
+      const match = applyAutoCorrectOnPreviousBlock(el, rules, autoCapitalize);
+      if (match) {
+        correctionMatch = match;
+        recordAutoCorrect(match.from, match.to);
+      }
+    }
+
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0) {
       savedRangeRef.current = sel.getRangeAt(0).cloneRange();
     }
-    pushStackSnapshot('New paragraph');
+    pushStackSnapshot(
+      correctionMatch
+        ? `Auto-correct "${correctionMatch.from}" → "${correctionMatch.to}"`
+        : 'New paragraph'
+    );
     updateStatsAndOutline();
     updateActiveFormats();
-  }, [pushStackSnapshot, restoreSelection, updateActiveFormats, updateStatsAndOutline]);
+  }, [
+    autoCapitalize,
+    autoCorrectEnabled,
+    pushStackSnapshot,
+    recordAutoCorrect,
+    restoreSelection,
+    rules,
+    updateActiveFormats,
+    updateStatsAndOutline,
+  ]);
 
   const handleVirtualMoveCaret = useCallback(
     (direction: 'left' | 'right') => {
@@ -1122,16 +1157,20 @@ export default function App() {
   }, []);
 
   const handleAddRule = useCallback((trigger: string, replacement: string) => {
-    setRules((prev) => [
-      {
-        id: `custom-${Date.now()}`,
-        trigger,
-        replacement,
-        enabled: true,
-        category: 'custom',
-      },
-      ...prev,
-    ]);
+    setRules((prev) => {
+      const normalized = trigger.toLowerCase();
+      const filtered = prev.filter((r) => r.trigger.toLowerCase() !== normalized);
+      return [
+        {
+          id: `custom-${Date.now()}`,
+          trigger,
+          replacement,
+          enabled: true,
+          category: 'custom',
+        },
+        ...filtered,
+      ];
+    });
   }, []);
 
   const handleDeleteRule = useCallback((id: string) => {
